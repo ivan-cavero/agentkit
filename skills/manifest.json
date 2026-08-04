@@ -113,7 +113,9 @@
     "desc": "Design skill by Nutlope/Together AI (MIT) that refuses to look AI-generated: 20 themes, 57 slop-test gates, and 4 verbs — build new UI, audit existing code, redesign keeping copy+IA, study a design you admire."
   },
   "writing": {
-    "files": "SKILL.md",
+    "files": [
+      "SKILL.md"
+    ],
     "hint": "anti-slop prose · EN + ES · quality gate",
     "description": "Anti-slop writing skill for prose and documents (EN + ES): kills filler, throat-clearers, fake emphasis, recap endings. 12-point quality gate.",
     "desc": "Anti-slop prose gate for documents (EN + ES): kills filler, throat-clearers, fake emphasis, recap endings. 12-point quality checklist + Spanish slop list (\"En este artículo exploraremos\", \"Cabe destacar\"...). Pairs with gauntlet-loop for iterative writing."

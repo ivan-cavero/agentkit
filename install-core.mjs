@@ -196,24 +196,52 @@ function getText(url) {
 
 function download(url, dest) {
     return new Promise((resolve) => {
-        const file = fs.createWriteStream(dest);
-        https.get(url, { timeout: 8000 }, (res) => {
-            if (res.statusCode && res.statusCode >= 400) {
-                file.close();
-                try { fs.unlinkSync(dest); } catch {}
+        try {
+            fs.mkdirSync(path.dirname(dest), { recursive: true });
+            // Refuse to open a path that is already a directory (EISDIR)
+            if (fs.existsSync(dest) && fs.statSync(dest).isDirectory()) {
                 return resolve(false);
             }
-            res.pipe(file);
-            file.on('finish', () => { file.close(); resolve(true); });
-        }).on('error', () => { file.close(); try { fs.unlinkSync(dest); } catch {} resolve(false); });
+            const file = fs.createWriteStream(dest);
+            file.on('error', () => { try { fs.unlinkSync(dest); } catch {} resolve(false); });
+            https.get(url, { timeout: 15000 }, (res) => {
+                if (res.statusCode && res.statusCode >= 400) {
+                    res.resume();
+                    file.close();
+                    try { fs.unlinkSync(dest); } catch {}
+                    return resolve(false);
+                }
+                res.pipe(file);
+                file.on('finish', () => { file.close(); resolve(true); });
+            }).on('error', () => { file.close(); try { fs.unlinkSync(dest); } catch {} resolve(false); });
+        } catch {
+            resolve(false);
+        }
     });
+}
+
+/** Normalize skill file lists from manifest (array, single string, or missing). */
+function normalizeSkillFiles(files, skillName) {
+    let list = files;
+    if (typeof list === 'string' && list.trim()) list = [list.trim()];
+    if (!Array.isArray(list) || list.length === 0) {
+        list = FALLBACK_SKILL_FILES[skillName] || ['SKILL.md'];
+    }
+    // Drop empties / "." / ".." — iterating a string char-by-char used to make
+    // path.join(dest, '.') === dest (directory) → EISDIR on createWriteStream.
+    return list
+        .map((f) => String(f || '').replace(/\\/g, '/').trim())
+        .filter((f) => f && f !== '.' && f !== '..' && !f.includes('\0'));
 }
 
 async function downloadSkill(name, destRoot, files) {
     fs.mkdirSync(destRoot, { recursive: true });
+    const list = normalizeSkillFiles(files, name);
     let ok = 0;
-    for (const rel of files) {
+    for (const rel of list) {
         const dest = path.join(destRoot, rel);
+        // Never write into the skill root as if it were a file
+        if (path.resolve(dest) === path.resolve(destRoot)) continue;
         fs.mkdirSync(path.dirname(dest), { recursive: true });
         if (await download(`${RAW}/skills/${name}/${rel}`, dest)) ok++;
     }
@@ -791,7 +819,7 @@ async function main() {
         spin.start('Installing skills...');
         let total = 0;
         for (const name of selected.skills) {
-            const files = skillManifest[name]?.files || FALLBACK_SKILL_FILES[name] || [];
+            const files = normalizeSkillFiles(skillManifest[name]?.files, name);
             total += await downloadSkill(name, path.join(dest, name), files);
         }
         spin.stop(`Installed ${selected.skills.length} skill(s) (${total} files) → ${dest}`);
@@ -819,7 +847,7 @@ async function main() {
             }
             for (const name of selected.skills) {
                 if (!dirs.skills) break;
-                const files = skillManifest[name]?.files || FALLBACK_SKILL_FILES[name] || [];
+                const files = normalizeSkillFiles(skillManifest[name]?.files, name);
                 totals[key].skills += await downloadSkill(name, path.join(dirs.skills, name), files);
             }
             for (const cmd of selected.commands) {
