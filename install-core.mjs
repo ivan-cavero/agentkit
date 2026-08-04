@@ -12,7 +12,7 @@ import { createRequire } from 'node:module';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const require = createRequire(import.meta.url);
-const TUI_DEPS = ['@clack/prompts@^0.9.0', 'kleur@^4.1.5'];
+const TUI_DEPS = { '@clack/prompts': '^0.9.0', kleur: '^4.1.5' };
 
 function hasModule(name) {
     try { require.resolve(name); return true; } catch { return false; }
@@ -21,17 +21,34 @@ function hasModule(name) {
 function ensureTuiDeps() {
     if (hasModule('@clack/prompts') && hasModule('kleur')) return;
     console.log('\n  AgentKit: installing TUI dependencies (@clack/prompts, kleur)...');
-    const cmd = process.platform === 'win32' ? 'npm.cmd' : 'npm';
-    // Install by package name into the script directory so curl|bash / irm|iex
-    // temp folders work even when package.json was not downloaded.
-    const r = spawnSync(
-        cmd,
-        ['install', '--prefix', __dirname, '--no-audit', '--no-fund', '--loglevel=error', ...TUI_DEPS],
-        { cwd: __dirname, stdio: 'inherit', windowsHide: true },
-    );
-    if (r.status !== 0 || !hasModule('@clack/prompts') || !hasModule('kleur')) {
+
+    // Bootstrap may drop only this .mjs into a temp dir (no package.json).
+    // Write a minimal one so `npm install` is reliable across platforms.
+    // Note: on Node 24 + Windows, spawnSync('npm.cmd', args) without shell
+    // returns EINVAL — always use shell:true with a single command string.
+    const pkgPath = path.join(__dirname, 'package.json');
+    if (!fs.existsSync(pkgPath)) {
+        fs.writeFileSync(pkgPath, JSON.stringify({
+            name: 'agentkit-installer-runtime',
+            private: true,
+            type: 'module',
+            dependencies: TUI_DEPS,
+        }, null, 2));
+    }
+
+    const r = spawnSync('npm install --no-audit --no-fund --loglevel=error', {
+        cwd: __dirname,
+        stdio: 'inherit',
+        shell: true,
+        env: process.env,
+    });
+
+    if ((r.status !== 0 && r.status !== null) || r.error || !hasModule('@clack/prompts') || !hasModule('kleur')) {
         console.error('\n  Failed to install dependencies.');
-        console.error('  Run manually: npm install --prefix "' + __dirname + '" ' + TUI_DEPS.join(' ') + '\n');
+        if (r.error) console.error('  spawn error:', r.error.message);
+        console.error('  Run manually:');
+        console.error('    cd "' + __dirname + '"');
+        console.error('    npm install\n');
         process.exit(1);
     }
 }
@@ -769,10 +786,24 @@ async function main() {
     process.exit(0);
 }
 
-const isMain = process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href;
-if (isMain) {
+function isMainModule() {
+    const entry = process.argv[1];
+    if (!entry) return false;
+    try {
+        const self = path.resolve(fileURLToPath(import.meta.url));
+        const started = path.resolve(entry);
+        return process.platform === 'win32'
+            ? self.toLowerCase() === started.toLowerCase()
+            : self === started;
+    } catch {
+        return import.meta.url === pathToFileURL(path.resolve(entry)).href;
+    }
+}
+
+if (isMainModule()) {
     main().catch((e) => {
-        outro(red(e.message));
+        console.error('\n  AgentKit error:', e?.message || e);
+        if (e?.stack) console.error(e.stack);
         process.exit(1);
     });
 }

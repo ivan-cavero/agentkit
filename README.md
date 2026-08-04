@@ -228,7 +228,8 @@ agentkit/
 
 | Problem | Cause | Fix |
 |---------|--------|-----|
-| `ERR_MODULE_NOT_FOUND: kleur` or `@clack/prompts` | Temp one-liner install missing deps | Fixed in current installer (installs by package name into the script dir). Re-run the one-liner from `main`. Or: `node install-core.mjs` from a clone after `npm install`. |
+| `ERR_MODULE_NOT_FOUND: kleur` or `@clack/prompts` | Temp one-liner missing deps | Fixed: writes a temp `package.json` and runs `npm install` (shell-safe on Windows/Node 24). Re-run the one-liner, or `node install-core.mjs` from a clone. |
+| Terminal closes after `irm … \| iex` | Bootstrap called `exit` | Fixed: bootstrap never calls `exit` (that ends the whole PowerShell session). |
 | `MCP merge failed: Unexpected non-whitespace…` | Bad remote fragment / comments | Installer uses JSONC-safe reads; ensure remote `opencode.json` is valid |
 | Install finishes but `agents=0` | Remote repo missing files | Confirm `ivan-cavero/agentkit` (or `AGENTKIT_REPO`) has `agents/` on `main` |
 | Test against a fork | — | `AGENTKIT_REPO=user/repo node install-core.mjs` |
