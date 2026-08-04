@@ -94,7 +94,20 @@ const BANNER = [
 const REPO = process.env.AGENTKIT_REPO || 'ivan-cavero/agentkit';
 const RAW = `https://raw.githubusercontent.com/${REPO}/main`;
 const HOME = process.env.HOME || process.env.USERPROFILE || '~';
-const CONFIG_DIR = path.join(HOME, '.config', 'opencode');
+// Standard user config. OpenCode 2 may override via OPENCODE_CONFIG_DIR
+// (Orca sets this to AppData\Roaming\orca\opencode-hooks\shared).
+const STANDARD_CONFIG_DIR = path.join(HOME, '.config', 'opencode');
+const ENV_CONFIG_DIR = process.env.OPENCODE_CONFIG_DIR || process.env.ORCA_OPENCODE_CONFIG_DIR || '';
+const CONFIG_DIR = ENV_CONFIG_DIR ? path.resolve(ENV_CONFIG_DIR) : STANDARD_CONFIG_DIR;
+/** All dirs where opencode config/agents/commands should be written. */
+function openCodeConfigDirs() {
+    const dirs = [STANDARD_CONFIG_DIR];
+    if (ENV_CONFIG_DIR) {
+        const resolved = path.resolve(ENV_CONFIG_DIR);
+        if (!dirs.some((d) => path.resolve(d) === resolved)) dirs.push(resolved);
+    }
+    return dirs;
+}
 
 // ─── Catalogs ─────────────────────────────────────────────
 const AGENT_CATALOG = [
@@ -373,51 +386,61 @@ function readJSON(file) {
     return JSON.parse(stripJsonc(raw).trim());
 }
 // ─── Provider writer ──────────────────────────────────────
-function resolveConfigFile(scope) {
+function resolveConfigFile(scope, baseDir = CONFIG_DIR) {
     if (scope === 'project') {
-        const p = path.join(process.cwd(), '.opencode', 'opencode.json');
-        fs.mkdirSync(path.dirname(p), { recursive: true });
-        if (!fs.existsSync(p)) fs.writeFileSync(p, JSON.stringify({ $schema: 'https://opencode.ai/config.json' }, null, 2));
-        return p;
+        // Prefer project-root opencode.json (OpenCode 2 discovers it); fall back to .opencode/
+        const root = path.join(process.cwd(), 'opencode.json');
+        const nested = path.join(process.cwd(), '.opencode', 'opencode.json');
+        if (fs.existsSync(root)) return root;
+        if (fs.existsSync(nested)) return nested;
+        fs.mkdirSync(path.dirname(nested), { recursive: true });
+        fs.writeFileSync(nested, JSON.stringify({ $schema: 'https://opencode.ai/config.json' }, null, 2));
+        return nested;
     }
-    if (fs.existsSync(path.join(CONFIG_DIR, 'opencode.jsonc'))) return path.join(CONFIG_DIR, 'opencode.jsonc');
-    if (fs.existsSync(path.join(CONFIG_DIR, 'opencode.json'))) return path.join(CONFIG_DIR, 'opencode.json');
-    const p = path.join(CONFIG_DIR, 'opencode.json');
-    fs.mkdirSync(CONFIG_DIR, { recursive: true });
+    if (fs.existsSync(path.join(baseDir, 'opencode.jsonc'))) return path.join(baseDir, 'opencode.jsonc');
+    if (fs.existsSync(path.join(baseDir, 'opencode.json'))) return path.join(baseDir, 'opencode.json');
+    const p = path.join(baseDir, 'opencode.json');
+    fs.mkdirSync(baseDir, { recursive: true });
     fs.writeFileSync(p, JSON.stringify({ $schema: 'https://opencode.ai/config.json' }, null, 2));
     return p;
+}
+
+/** Global config paths for every OpenCode config root (standard + OPENCODE_CONFIG_DIR). */
+function resolveAllGlobalConfigFiles() {
+    return openCodeConfigDirs().map((dir) => resolveConfigFile('global', dir));
 }
 
 /** Convert v1-style model meta → OpenCode v2 model entry (capabilities, etc.). */
 function toV2ModelEntry(meta = {}) {
     const entry = {};
     if (meta.name) entry.name = meta.name;
+    // OpenCode 2 requires non-empty modality arrays when capabilities are set
+    // (migration does modalities?.input ?? [] which can hide chat models).
     entry.capabilities = {
         tools: meta.tool_call !== false,
-        input: meta.modalities?.input || ['text'],
-        output: meta.modalities?.output || ['text'],
+        input: (meta.modalities?.input?.length ? meta.modalities.input : ['text']),
+        output: (meta.modalities?.output?.length ? meta.modalities.output : ['text']),
     };
     if (meta.limit) entry.limit = meta.limit;
     return entry;
 }
 
 /**
- * Write a custom OpenAI-compatible provider for BOTH:
- *   · OpenCode classic (v1): `provider` + npm `@ai-sdk/openai-compatible` + options
- *   · OpenCode 2 (beta):     `providers` + package `@opencode-ai/ai/providers/openai-compatible` + settings
- * Same config file is shared (~/.config/opencode/opencode.json).
+ * Write a custom OpenAI-compatible provider for BOTH OpenCode classic and v2.
+ *
+ * Critical OpenCode 2 behavior (next/beta):
+ *   If the config still has v1 keys (`provider`, `plugin`, or v1-shaped `mcp`),
+ *   OpenCode 2 runs ConfigMigrateV1 and ONLY migrates `provider` (singular).
+ *   A pure `providers` (plural) block is treated as an excess property and DROPPED.
+ *   So we MUST keep writing the classic `provider` + npm + options shape.
+ *
+ * We also write `providers` (plural) with package `aisdk:@ai-sdk/openai-compatible`
+ * for pure-v2 configs (no v1 keys) — matching what migration emits.
+ *
  * @see https://opencode.ai/docs/providers/
  * @see https://opencode.ai/v2/docs/providers
  */
-function writeProvider(configFile, id, name, url, key, models, defaultModel) {
-    const cfg = readJSON(configFile);
-    const modelsV1 = models || {};
-    const modelsV2 = {};
-    for (const [mid, meta] of Object.entries(modelsV1)) {
-        modelsV2[mid] = toV2ModelEntry(meta);
-    }
-
-    // ── OpenCode v1 (classic `opencode`) ──────────────────
+function applyProviderToConfig(cfg, id, name, url, key, modelsV1, modelsV2, defaultModel) {
     if (!cfg.provider) cfg.provider = {};
     cfg.provider[id] = {
         npm: '@ai-sdk/openai-compatible',
@@ -426,14 +449,14 @@ function writeProvider(configFile, id, name, url, key, models, defaultModel) {
         models: modelsV1,
     };
 
-    // ── OpenCode v2 (`opencode2` / beta) ──────────────────
-    // Key names differ: providers (plural), package, settings — not npm/options.
+    // Pure v2 shape (when config is not detected as v1). package form MUST be
+    // aisdk:… — matches ConfigMigrateV1.migrateProvider and ModelResolver routes.
     if (!cfg.providers) cfg.providers = {};
     const envName = `${String(id).replace(/[^a-zA-Z0-9]+/g, '_').toUpperCase()}_API_KEY`;
     cfg.providers[id] = {
         name,
         ...(key ? { env: [envName] } : {}),
-        package: '@opencode-ai/ai/providers/openai-compatible',
+        package: 'aisdk:@ai-sdk/openai-compatible',
         settings: {
             baseURL: url,
             ...(key ? { apiKey: key } : {}),
@@ -442,7 +465,37 @@ function writeProvider(configFile, id, name, url, key, models, defaultModel) {
     };
 
     cfg.model = `${id}/${defaultModel}`;
-    fs.writeFileSync(configFile, JSON.stringify(cfg, null, 2));
+    return cfg;
+}
+
+function writeProvider(configFile, id, name, url, key, models, defaultModel) {
+    const modelsV1 = { ...(models || {}) };
+    // Explicit text modalities so v2 capabilities migrate cleanly
+    for (const mid of Object.keys(modelsV1)) {
+        const m = modelsV1[mid] = { ...modelsV1[mid] };
+        if (!m.modalities) m.modalities = { input: ['text'], output: ['text'] };
+        if (m.tool_call === undefined) m.tool_call = true;
+    }
+    const modelsV2 = {};
+    for (const [mid, meta] of Object.entries(modelsV1)) {
+        modelsV2[mid] = toV2ModelEntry(meta);
+    }
+
+    // Write to the primary config file AND every OpenCode config root
+    // (OPENCODE_CONFIG_DIR / Orca shared dir often differs from ~/.config/opencode).
+    const targets = new Set([configFile, ...resolveAllGlobalConfigFiles()]);
+    for (const file of targets) {
+        try {
+            fs.mkdirSync(path.dirname(file), { recursive: true });
+            const cfg = fs.existsSync(file)
+                ? readJSON(file)
+                : { $schema: 'https://opencode.ai/config.json' };
+            applyProviderToConfig(cfg, id, name, url, key, modelsV1, modelsV2, defaultModel);
+            fs.writeFileSync(file, JSON.stringify(cfg, null, 2));
+        } catch (e) {
+            console.error(`  warn: could not write provider to ${file}: ${e.message}`);
+        }
+    }
 }
 
 function getNaNModelConfig(id) {
@@ -484,12 +537,15 @@ function modelHint(id) {
 function harnessDirs(harnessId, scope, ocVersion) {
     const v = ocVersion === 'v1' ? { agents: 'agent', commands: 'command' } : { agents: 'agents', commands: 'commands' };
     if (harnessId === 'opencode' || harnessId === 'opencode2' || harnessId === 'omo') {
+        // Agents/commands: primary CONFIG_DIR (respects OPENCODE_CONFIG_DIR).
+        // Install loop also mirrors into other openCodeConfigDirs() when present.
         return {
             agents: path.join(CONFIG_DIR, v.agents),
             commands: path.join(CONFIG_DIR, v.commands),
             skills: scope === 'project'
                 ? path.join(process.cwd(), '.agents', 'skills')
                 : path.join(HOME, '.agents', 'skills'),
+            _mirrorDirs: openCodeConfigDirs().filter((d) => path.resolve(d) !== path.resolve(CONFIG_DIR)),
         };
     }
     if (harnessId === 'omp') {
@@ -901,6 +957,12 @@ async function main() {
                 if (!dirs.agents) break;
                 fs.mkdirSync(dirs.agents, { recursive: true });
                 if (await download(`${RAW}/agents/${agent}`, path.join(dirs.agents, agent))) totals[key].agents++;
+                // Mirror into extra OpenCode config roots (e.g. Orca OPENCODE_CONFIG_DIR)
+                for (const mirror of dirs._mirrorDirs || []) {
+                    const agentDir = path.join(mirror, path.basename(dirs.agents));
+                    fs.mkdirSync(agentDir, { recursive: true });
+                    await download(`${RAW}/agents/${agent}`, path.join(agentDir, agent));
+                }
             }
             for (const name of selected.skills) {
                 if (!dirs.skills) break;
@@ -911,6 +973,11 @@ async function main() {
                 if (!dirs.commands) break;
                 fs.mkdirSync(dirs.commands, { recursive: true });
                 if (await download(`${RAW}/commands/${cmd}`, path.join(dirs.commands, cmd))) totals[key].commands++;
+                for (const mirror of dirs._mirrorDirs || []) {
+                    const cmdDir = path.join(mirror, path.basename(dirs.commands));
+                    fs.mkdirSync(cmdDir, { recursive: true });
+                    await download(`${RAW}/commands/${cmd}`, path.join(cmdDir, cmd));
+                }
             }
         }
     }
@@ -931,6 +998,10 @@ async function main() {
         summaryLines.push(`  ${key}: agents=${t.agents} skills=${t.skills} commands=${t.commands}`);
     }
     if (configFile) summaryLines.push(`  Config:  ${configFile}`);
+    if (ENV_CONFIG_DIR) {
+        summaryLines.push(`  ${P.warn('OPENCODE_CONFIG_DIR:')} ${CONFIG_DIR}`);
+        summaryLines.push(`  ${P.hint('(also wrote ~/.config/opencode — Orca/opencode2 uses OPENCODE_CONFIG_DIR)')}`);
+    }
     if (mcps.length) summaryLines.push(`  MCPs:    ${mcps.join(', ')}`);
     summaryLines.push(`  ${P.brand('Gauntlet:')} ${fullMode && (selected.agents.some((a) => a.includes('gauntlet')) || selected.skills.includes('gauntlet-loop')) ? 'yes' : 'no'}`);
     note(summaryLines.join('\n'));
