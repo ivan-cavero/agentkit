@@ -1,0 +1,11 @@
+{
+  "name": "agentkit",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Universal installer: agents, skills, commands for opencode v1/v2, OMO, Claude Code, Codex, standalone",
+  "dependencies": {
+    "@clack/prompts": "^0.9.0",
+    "kleur": "^4.1.5"
+  }
+}

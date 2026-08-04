@@ -2,8 +2,5 @@
 set -e
 TMP=$(mktemp -d)
 trap "rm -rf $TMP" EXIT
-cd "$TMP"
-npm init -y >/dev/null 2>&1
-npm install @clack/prompts kleur >/dev/null 2>&1
-curl -fsSL "https://raw.githubusercontent.com/ivan-cavero/opencode-research-agent/main/install-core.mjs" -o install.mjs
-exec node install.mjs < /dev/tty
+curl -fsSL "https://raw.githubusercontent.com/ivan-cavero/agentkit/main/install-core.mjs" -o "$TMP/install.mjs"
+exec node "$TMP/install.mjs" < /dev/tty
