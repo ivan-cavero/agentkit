@@ -159,14 +159,24 @@ const HARNESSES = [
 ];
 
 // ─── Network helpers ──────────────────────────────────────
-function getJSON(url, headers = {}) {
+function getJSON(url, headers = {}, { timeout = 15000, redirects = 5 } = {}) {
     return new Promise((resolve) => {
-        const opts = { timeout: 4000, headers };
-        https.get(url, opts, (res) => {
+        const req = https.get(url, { headers, timeout }, (res) => {
+            // Follow redirects (some OpenAI-compatible APIs bounce)
+            if (res.statusCode && res.statusCode >= 300 && res.statusCode < 400 && res.headers.location && redirects > 0) {
+                res.resume();
+                const next = new URL(res.headers.location, url).href;
+                return resolve(getJSON(next, headers, { timeout, redirects: redirects - 1 }));
+            }
             let d = '';
             res.on('data', (ch) => d += ch);
-            res.on('end', () => { try { resolve(JSON.parse(d)); } catch { resolve(null); } });
-        }).on('error', () => resolve(null));
+            res.on('end', () => {
+                if (res.statusCode && res.statusCode >= 400) return resolve(null);
+                try { resolve(JSON.parse(d)); } catch { resolve(null); }
+            });
+        });
+        req.on('error', () => resolve(null));
+        req.on('timeout', () => { req.destroy(); resolve(null); });
     });
 }
 
@@ -210,9 +220,35 @@ async function downloadSkill(name, destRoot, files) {
     return ok;
 }
 
-function run(cmd) {
+function run(cmd, { inherit = false } = {}) {
+    // inherit=true for interactive tools (TimeFly login, etc.) so the user can
+    // actually see prompts. Default pipe keeps setup noise out of the TUI.
     const sh = process.platform === 'win32';
-    return spawnSync(sh ? 'cmd' : 'bash', [sh ? '/c' : '-c', cmd], { stdio: 'pipe' });
+    return spawnSync(sh ? 'cmd' : 'bash', [sh ? '/c' : '-c', cmd], {
+        stdio: inherit ? 'inherit' : 'pipe',
+        env: process.env,
+    });
+}
+
+// Known NaN chat models — always offered even if /models is slow or partial.
+const KNOWN_NAN_MODELS = [
+    { id: 'deepseek-v4-flash', hint: '284B MoE · 1M ctx · reasoning' },
+    { id: 'mimo-v2.5', hint: '310B MoE · omnimodal (text+vision+audio)' },
+    { id: 'gemma4', hint: '26B MoE · multimodal · vision' },
+    { id: 'qwen3.6', hint: '35B MoE · 256K ctx · multimodal' },
+];
+
+function mergeModelOptions(apiModels, known = []) {
+    const byId = new Map();
+    for (const k of known) byId.set(k.id, { label: k.id, value: k.id, hint: k.hint || modelHint(k.id) });
+    for (const m of apiModels || []) {
+        const id = typeof m === 'string' ? m : m?.id;
+        if (!id) continue;
+        if (id.includes('embedding') || id.includes('rerank') || id.includes('kokoro') || id.includes('whisper')) continue;
+        const prev = byId.get(id);
+        byId.set(id, { label: id, value: id, hint: prev?.hint || modelHint(id) });
+    }
+    return [...byId.values()].sort((a, b) => a.label.localeCompare(b.label));
 }
 
 // ─── Harness detection ────────────────────────────────────
@@ -610,27 +646,37 @@ async function main() {
                     note(gray('Get unlimited tokens → ') + cyan('https://cloud.nan.builders/r/F6K91G94') + gray(' (70 €/month)'));
                     const pkey = await password({ message: 'NaN API key (get one at cloud.nan.builders)', mask: '*' });
                     if (isCancel(pkey)) process.exit(0);
-                    const authHeader = pkey ? { Authorization: `Bearer ${pkey}` } : {};
-                    const models = await getJSON(`${purl}/models`, authHeader);
-                    if (models?.data?.length > 0) {
-                        const chatModels = models.data.filter((m) => !m.id.includes('embedding') && !m.id.includes('rerank') && !m.id.includes('kokoro') && !m.id.includes('whisper'));
-                        if (chatModels.length > 0) {
-                            const pmodel = await select({ message: 'Default model', options: chatModels.map((m) => ({ label: m.id, value: m.id, hint: modelHint(m.id) })) });
-                            if (!isCancel(pmodel)) {
-                                const modelIds = chatModels.map((m) => m.id);
-                                const modelsCfg = {};
-                                for (const mId of modelIds) modelsCfg[mId] = getNaNModelConfig(mId);
-                                writeProvider(configFile, pid, pname, purl, pkey, modelsCfg, pmodel);
-                            }
-                        } else {
-                            const pmodel = await text({ message: 'Model name', initialValue: 'deepseek-v4-flash' });
-                            if (!isCancel(pmodel)) writeProvider(configFile, pid, pname, purl, pkey, { [pmodel]: getNaNModelConfig(pmodel) }, pmodel);
-                        }
-                    } else {
-                        note(yellow('Could not fetch model list — enter manually'));
-                        const pmodel = await text({ message: 'Model name', initialValue: 'deepseek-v4-flash' });
-                        if (!isCancel(pmodel)) writeProvider(configFile, pid, pname, purl, pkey, { [pmodel]: getNaNModelConfig(pmodel) }, pmodel);
-                    }
+                    const key = typeof pkey === 'string' ? pkey.trim() : '';
+                    const authHeader = key ? { Authorization: `Bearer ${key}` } : {};
+
+                    const spinModels = spinner();
+                    spinModels.start('Fetching NaN model list…');
+                    const models = await getJSON(`${purl}/models`, authHeader, { timeout: 20000 });
+                    const apiList = Array.isArray(models?.data) ? models.data : [];
+                    spinModels.stop(apiList.length
+                        ? `Fetched ${apiList.length} model(s) from NaN`
+                        : 'Could not fetch live list — using known NaN models');
+
+                    // Always offer a full picker: known models ∪ live API (chat only)
+                    const options = mergeModelOptions(apiList, KNOWN_NAN_MODELS);
+                    note([
+                        P.brand('Choose the default OpenCode model for NaN'),
+                        gray('  ↑/↓ move · Enter confirm · all listed models are registered in your config'),
+                        '',
+                        ...options.map((o) => `  · ${o.label}${o.hint ? gray('  — ' + o.hint) : ''}`),
+                    ].join('\n'));
+
+                    const pmodel = await select({
+                        message: 'Default NaN model',
+                        options,
+                        initialValue: options.find((o) => o.value === 'deepseek-v4-flash')?.value || options[0]?.value,
+                    });
+                    if (isCancel(pmodel) || !pmodel) process.exit(0);
+
+                    const modelsCfg = {};
+                    for (const o of options) modelsCfg[o.value] = getNaNModelConfig(o.value);
+                    writeProvider(configFile, pid, pname, purl, key, modelsCfg, pmodel);
+                    note(green(`Provider NaN saved · default model = nan/${pmodel}`));
                 } else {
                     const pid = await text({ message: 'Provider ID (e.g. myprovider)', initialValue: 'myprovider' });
                     if (isCancel(pid)) process.exit(0);
@@ -640,16 +686,29 @@ async function main() {
                     if (isCancel(purl)) process.exit(0);
                     const pkey = await password({ message: 'API key (optional)', mask: '*' });
                     if (isCancel(pkey)) process.exit(0);
-                    const authHeader = pkey ? { Authorization: `Bearer ${pkey}` } : {};
-                    const models = await getJSON(`${purl}/models`, authHeader);
-                    const pmodel = models?.data?.length > 0
-                        ? await select({ message: 'Default model', options: models.data.map((m) => ({ label: m.id, value: m.id })) })
-                        : await text({ message: 'Model name', initialValue: 'gpt-4o' });
-                    if (!isCancel(pmodel)) {
-                        const modelIds = models?.data?.length > 0 ? models.data.map((m) => m.id) : [pmodel];
+                    const key = typeof pkey === 'string' ? pkey.trim() : '';
+                    const authHeader = key ? { Authorization: `Bearer ${key}` } : {};
+
+                    const spinModels = spinner();
+                    spinModels.start('Fetching model list…');
+                    const models = await getJSON(`${purl}/models`, authHeader, { timeout: 20000 });
+                    const apiList = Array.isArray(models?.data) ? models.data : [];
+                    spinModels.stop(apiList.length ? `Fetched ${apiList.length} model(s)` : 'No live list — type a model name');
+
+                    let pmodel;
+                    if (apiList.length > 0) {
+                        const options = mergeModelOptions(apiList);
+                        note(options.map((o) => `  · ${o.label}`).join('\n'));
+                        pmodel = await select({ message: 'Default model', options, initialValue: options[0]?.value });
+                    } else {
+                        pmodel = await text({ message: 'Default model name', initialValue: 'gpt-4o' });
+                    }
+                    if (!isCancel(pmodel) && pmodel) {
+                        const modelIds = apiList.length > 0 ? mergeModelOptions(apiList).map((o) => o.value) : [pmodel];
                         const customModels = {};
                         for (const mId of modelIds) customModels[mId] = { name: `${pname} ${mId}`, tool_call: true };
-                        writeProvider(configFile, pid, pname, purl, pkey, customModels, pmodel);
+                        writeProvider(configFile, pid, pname, purl, key, customModels, pmodel);
+                        note(green(`Provider ${pid} saved · default model = ${pid}/${pmodel}`));
                     }
                 }
             }
@@ -658,7 +717,7 @@ async function main() {
             if (isCancel(wantPlugins)) process.exit(0);
             if (wantPlugins) {
                 note('Setting up TimeFly plugin...');
-                run('bunx @timefly/opencode-plugin setup-opencode -- --target user 2>/dev/null || npx @timefly/opencode-plugin setup-opencode -- --target user 2>/dev/null');
+                run('bunx @timefly/opencode-plugin setup-opencode -- --target user 2>nul || npx @timefly/opencode-plugin setup-opencode -- --target user 2>nul', { inherit: true });
                 const timeflyCfg = path.join(CONFIG_DIR, 'opencode.json');
                 if (configFile.endsWith('.jsonc') && fs.existsSync(timeflyCfg)) {
                     try {
@@ -671,22 +730,33 @@ async function main() {
                         }
                     } catch (e) { note(yellow(`TimeFly merge: ${e.message}`)); }
                 }
-                const doLogin = await confirm({ message: 'Log in to TimeFly?', initialValue: true });
-                if (doLogin) run('bunx @timefly/opencode-plugin login 2>/dev/null || npx @timefly/opencode-plugin login 2>/dev/null');
+                const doLogin = await confirm({ message: 'Log in to TimeFly? (interactive browser/CLI)', initialValue: true });
+                if (doLogin) {
+                    note(gray('Handing terminal to TimeFly login — complete it, then we continue…'));
+                    run('bunx @timefly/opencode-plugin login || npx @timefly/opencode-plugin login', { inherit: true });
+                }
             }
 
+            // Always ask which primary agent is default (even if one was set before)
             const primaryFiles = ['research.md', 'deep-research.md', 'code.md', 'docs-writer.md'];
             const installedPrimary = selected.agents.filter((a) => primaryFiles.includes(a));
             if (installedPrimary.length > 0) {
                 try {
                     const cfg = readJSON(configFile);
-                    if (!cfg.default_agent) {
-                        const da = await select({
-                            message: 'Default agent',
-                            options: installedPrimary.map((f) => ({ label: f.replace('.md', ''), value: f.replace('.md', '') })),
-                            initialValue: 'code',
-                        });
-                        if (!isCancel(da)) { cfg.default_agent = da; fs.writeFileSync(configFile, JSON.stringify(cfg, null, 2)); }
+                    const current = cfg.default_agent || 'code';
+                    const da = await select({
+                        message: 'Default agent (OpenCode tab on start)',
+                        options: installedPrimary.map((f) => ({
+                            label: f.replace('.md', ''),
+                            value: f.replace('.md', ''),
+                            hint: f.replace('.md', '') === current ? 'current' : '',
+                        })),
+                        initialValue: installedPrimary.some((f) => f.replace('.md', '') === current) ? current : 'code',
+                    });
+                    if (!isCancel(da) && da) {
+                        cfg.default_agent = da;
+                        fs.writeFileSync(configFile, JSON.stringify(cfg, null, 2));
+                        note(green(`Default agent = ${da}`));
                     }
                 } catch (e) { note(yellow(`default_agent: ${e.message}`)); }
             }
