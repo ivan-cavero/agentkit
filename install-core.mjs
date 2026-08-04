@@ -388,25 +388,82 @@ function resolveConfigFile(scope) {
     return p;
 }
 
+/** Convert v1-style model meta → OpenCode v2 model entry (capabilities, etc.). */
+function toV2ModelEntry(meta = {}) {
+    const entry = {};
+    if (meta.name) entry.name = meta.name;
+    entry.capabilities = {
+        tools: meta.tool_call !== false,
+        input: meta.modalities?.input || ['text'],
+        output: meta.modalities?.output || ['text'],
+    };
+    if (meta.limit) entry.limit = meta.limit;
+    return entry;
+}
+
+/**
+ * Write a custom OpenAI-compatible provider for BOTH:
+ *   · OpenCode classic (v1): `provider` + npm `@ai-sdk/openai-compatible` + options
+ *   · OpenCode 2 (beta):     `providers` + package `@opencode-ai/ai/providers/openai-compatible` + settings
+ * Same config file is shared (~/.config/opencode/opencode.json).
+ * @see https://opencode.ai/docs/providers/
+ * @see https://opencode.ai/v2/docs/providers
+ */
 function writeProvider(configFile, id, name, url, key, models, defaultModel) {
     const cfg = readJSON(configFile);
+    const modelsV1 = models || {};
+    const modelsV2 = {};
+    for (const [mid, meta] of Object.entries(modelsV1)) {
+        modelsV2[mid] = toV2ModelEntry(meta);
+    }
+
+    // ── OpenCode v1 (classic `opencode`) ──────────────────
     if (!cfg.provider) cfg.provider = {};
     cfg.provider[id] = {
         npm: '@ai-sdk/openai-compatible',
         name,
         options: { baseURL: url, ...(key ? { apiKey: key } : {}) },
-        models,
+        models: modelsV1,
     };
+
+    // ── OpenCode v2 (`opencode2` / beta) ──────────────────
+    // Key names differ: providers (plural), package, settings — not npm/options.
+    if (!cfg.providers) cfg.providers = {};
+    const envName = `${String(id).replace(/[^a-zA-Z0-9]+/g, '_').toUpperCase()}_API_KEY`;
+    cfg.providers[id] = {
+        name,
+        ...(key ? { env: [envName] } : {}),
+        package: '@opencode-ai/ai/providers/openai-compatible',
+        settings: {
+            baseURL: url,
+            ...(key ? { apiKey: key } : {}),
+        },
+        models: modelsV2,
+    };
+
     cfg.model = `${id}/${defaultModel}`;
     fs.writeFileSync(configFile, JSON.stringify(cfg, null, 2));
 }
 
 function getNaNModelConfig(id) {
     const common = { tool_call: true, reasoning: true };
-    if (id === 'deepseek-v4-flash') return { ...common, name: 'NaN deepseek-v4-flash', limit: { context: 1_048_576, output: 65536 } };
-    if (id === 'mimo-v2.5') return { ...common, name: 'NaN mimo-v2.5', limit: { context: 1_048_576, output: 65536 }, modalities: { input: ['text', 'image', 'audio'], output: ['text'] } };
-    if (id === 'gemma4') return { ...common, name: 'NaN gemma4', limit: { context: 262_144, output: 65536 }, modalities: { input: ['text', 'image'], output: ['text'] } };
-    if (id === 'qwen3.6') return { ...common, name: 'NaN qwen3.6', limit: { context: 262_144, output: 65536 }, modalities: { input: ['text', 'image'], output: ['text'] } };
+    // deepseek-v4-flash and dated snapshots share the same profile
+    if (id === 'deepseek-v4-flash' || id.startsWith('deepseek-v4-flash')) {
+        return { ...common, name: `NaN ${id}`, limit: { context: 1_048_576, output: 65536 } };
+    }
+    if (id === 'mimo-v2.5' || id.startsWith('mimo-')) {
+        return { ...common, name: `NaN ${id}`, limit: { context: 1_048_576, output: 65536 }, modalities: { input: ['text', 'image', 'audio'], output: ['text'] } };
+    }
+    if (id === 'gemma4' || id.startsWith('gemma')) {
+        return { ...common, name: `NaN ${id}`, limit: { context: 262_144, output: 65536 }, modalities: { input: ['text', 'image'], output: ['text'] } };
+    }
+    if (id === 'qwen3.6' || id.startsWith('qwen')) {
+        return { ...common, name: `NaN ${id}`, limit: { context: 262_144, output: 65536 }, modalities: { input: ['text', 'image'], output: ['text'] } };
+    }
+    // image generators etc. — still list them; tools off by default for non-chat
+    if (id.includes('flux') || id.includes('image') || id.includes('dall')) {
+        return { name: `NaN ${id}`, tool_call: false, modalities: { input: ['text'], output: ['image'] } };
+    }
     return { name: `NaN ${id}`, tool_call: true };
 }
 
