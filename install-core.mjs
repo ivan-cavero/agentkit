@@ -6,24 +6,40 @@ import { pathToFileURL, fileURLToPath } from 'node:url';
 import { createRequire } from 'node:module';
 
 // ─── AgentKit — universal installer ───────────────────────
-// Uses @clack/prompts for the TUI. Auto-installs deps if missing.
+// Uses @clack/prompts + kleur for the TUI. Auto-installs deps if missing.
+// IMPORTANT: both must be dynamic imports — static `import kleur` is hoisted
+// and runs BEFORE this ensure step (breaks curl|bash / irm|iex temp installs).
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const require = createRequire(import.meta.url);
-const HAS_DEPS = (() => { try { require.resolve('@clack/prompts'); return true; } catch { return false; } })();
+const TUI_DEPS = ['@clack/prompts@^0.9.0', 'kleur@^4.1.5'];
 
-if (!HAS_DEPS) {
+function hasModule(name) {
+    try { require.resolve(name); return true; } catch { return false; }
+}
+
+function ensureTuiDeps() {
+    if (hasModule('@clack/prompts') && hasModule('kleur')) return;
     console.log('\n  AgentKit: installing TUI dependencies (@clack/prompts, kleur)...');
     const cmd = process.platform === 'win32' ? 'npm.cmd' : 'npm';
-    const r = spawnSync(cmd, ['install', '--no-audit', '--no-fund', '--loglevel=error'], { cwd: __dirname, stdio: 'inherit' });
-    if (r.status !== 0) {
-        console.error('\n  Failed to install dependencies. Run manually: cd ' + __dirname + ' && npm install\n');
+    // Install by package name into the script directory so curl|bash / irm|iex
+    // temp folders work even when package.json was not downloaded.
+    const r = spawnSync(
+        cmd,
+        ['install', '--prefix', __dirname, '--no-audit', '--no-fund', '--loglevel=error', ...TUI_DEPS],
+        { cwd: __dirname, stdio: 'inherit', windowsHide: true },
+    );
+    if (r.status !== 0 || !hasModule('@clack/prompts') || !hasModule('kleur')) {
+        console.error('\n  Failed to install dependencies.');
+        console.error('  Run manually: npm install --prefix "' + __dirname + '" ' + TUI_DEPS.join(' ') + '\n');
         process.exit(1);
     }
 }
 
+ensureTuiDeps();
+
 const { select, multiselect, confirm, text, password, intro, outro, note, isCancel, spinner } = await import('@clack/prompts');
-import kleur from 'kleur';
+const kleur = (await import('kleur')).default;
 const { bold, green, yellow, cyan, gray, red, magenta, blue, dim, underline } = kleur;
 // Modern palette: brighter, friendlier on dark terminals.
 const P = {
@@ -240,10 +256,6 @@ function detectHarnesses() {
 
 // ─── JSONC-safe read (BOM + comments) ─────────────────────
 // opencode configs may be JSONC (comments allowed). Strip them before parse.
-// ─── JSONC-safe read (BOM + comments) ─────────────────────
-// opencode configs may be JSONC (comments allowed). Strip them before parse.
-// ─── JSONC-safe read (BOM + comments) ─────────────────────
-// opencode configs may be JSONC (comments allowed). Strip them before parse.
 function stripJsonc(src) {
     let s = src.replace(/^﻿/, '');
     let out = '';
@@ -326,20 +338,20 @@ function modelHint(id) {
 }
 
 // ─── Target dirs per harness ──────────────────────────────
+// Policy:
+//   · Agents + commands are ALWAYS user-global (per harness). Never project-scoped.
+//   · Skills: global → ~/.agents/skills (or harness-native skills dir);
+//             project → .agents/skills in the current repo (OpenCode/OMO only).
+//   · Claude / Codex / omp ignore scope and always install to their user dirs.
 function harnessDirs(harnessId, scope, ocVersion) {
     const v = ocVersion === 'v1' ? { agents: 'agent', commands: 'command' } : { agents: 'agents', commands: 'commands' };
     if (harnessId === 'opencode' || harnessId === 'opencode2' || harnessId === 'omo') {
-        if (scope === 'project') {
-            return {
-                agents: path.join(process.cwd(), '.opencode', v.agents),
-                skills: path.join(process.cwd(), '.opencode', 'skills'),
-                commands: path.join(process.cwd(), '.opencode', v.commands),
-            };
-        }
         return {
             agents: path.join(CONFIG_DIR, v.agents),
-            skills: path.join(CONFIG_DIR, 'skills'),
             commands: path.join(CONFIG_DIR, v.commands),
+            skills: scope === 'project'
+                ? path.join(process.cwd(), '.agents', 'skills')
+                : path.join(HOME, '.agents', 'skills'),
         };
     }
     if (harnessId === 'omp') {
@@ -416,10 +428,10 @@ async function main() {
     let scope = 'global';
     if (wantsOcLike) {
         const scopePick = await select({
-            message: P.step('Step 3/8') + ' — Install where? (opencode / OMO)',
+            message: P.step('Step 3/8') + ' — Skills where? (agents/commands are always global)',
             options: [
-                { label: 'Global (user config)', value: 'global', hint: '~/.config/opencode' },
-                { label: 'Current project', value: 'project', hint: `.opencode/ in ${process.cwd()}` },
+                { label: 'Global skills', value: 'global', hint: '~/.agents/skills · agents/commands → each harness user dir' },
+                { label: 'Project skills only', value: 'project', hint: `.agents/skills in ${process.cwd()} · agents/commands still global` },
             ],
             initialValue: 'global',
         });
@@ -544,7 +556,8 @@ async function main() {
                 if (isCancel(mcps)) process.exit(0);
             }
 
-            configFile = resolveConfigFile(scope);
+            // Agents/commands are always global → MCP/provider config always user-global too
+            configFile = resolveConfigFile('global');
 
             if (mcps.length > 0) {
                 const frag = await getText(`${RAW}/opencode.json`);
@@ -666,10 +679,11 @@ async function main() {
     // ── Standalone: skills only ───────────────────────────
     if (standalone && selected.skills.length === 0) {
         const destOptions = [
-            { label: '~/.agents/skills', value: path.join(HOME, '.agents', 'skills'), hint: 'auto-loaded by opencode & many agents' },
+            { label: '~/.agents/skills', value: path.join(HOME, '.agents', 'skills'), hint: 'Agent Skills standard — OpenCode, Claude, Codex, …' },
+            { label: '.agents/skills (current project)', value: path.join(process.cwd(), '.agents', 'skills'), hint: 'project-scoped standard path' },
             { label: '~/.claude/skills', value: path.join(HOME, '.claude', 'skills'), hint: 'Claude Code + Oh My Pi' },
-            { label: '~/.config/opencode/skills', value: path.join(CONFIG_DIR, 'skills'), hint: 'opencode / OMO global' },
-            { label: '.opencode/skills (current project)', value: path.join(process.cwd(), '.opencode', 'skills'), hint: 'project-scoped' },
+            { label: '~/.config/opencode/skills', value: path.join(CONFIG_DIR, 'skills'), hint: 'OpenCode-native global (optional)' },
+            { label: '.opencode/skills (current project)', value: path.join(process.cwd(), '.opencode', 'skills'), hint: 'OpenCode-native project path' },
             { label: 'Custom path', value: '__custom__', hint: 'type your own' },
         ];
         const destChoice = await select({ message: 'Install skills where?', options: destOptions, initialValue: path.join(HOME, '.agents', 'skills') });

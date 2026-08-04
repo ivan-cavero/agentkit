@@ -1,242 +1,243 @@
-# ⚡ AgentKit
+# AgentKit
 
-**Instalador universal de agentes, skills y comandos para tus coding agents.**
+**Universal installer for agents, skills, and commands** — works with OpenCode (v1/v2), oh-my-opencode (OMO), Oh My Pi (omp), Claude Code, Codex CLI, or **standalone** (skills only).
 
-Un solo comando instala lo que necesitas en **opencode (v1 y v2)**, **oh-my-opencode (OMO)**, **Oh My Pi (omp)**, **Claude Code**, **Codex CLI** — o en modo *standalone* (solo skills, sin ningún harness).
-
-Cero configuración manual: detecta qué tienes instalado, te pregunta qué quieres (paso a paso), y escribe los archivos en las rutas correctas de cada herramienta.
+One command detects what you have, asks what you want, and writes files to the correct paths. Skills use the portable **Agent Skills** standard (`.agents/skills`, `~/.agents/skills`) so they load across tools.
 
 ---
 
-## Tabla de contenidos
+## Install
 
-1. [Conceptos: agent, skill, command](#conceptos)
-2. [El Gauntlet Loop](#gauntlet)
-3. [Las 4 skills incluidas](#skills)
-4. [Los 8 agentes incluidos](#agentes)
-5. [Harnesses soportados](#harnesses)
-6. [Modos de instalación](#modos)
-7. [Instalación](#instalacion)
-8. [Cómo se usa después](#uso)
-9. [Estructura del repo](#estructura)
-10. [Solución de problemas](#troubleshooting)
+### Requirements
+
+- **Node.js** v18+ (the installer auto-installs its own TUI deps — no manual `npm install` needed for a one-liner install)
+- Docker/Podman only if you enable the SearXNG MCP
+- A coding harness only if you want full mode (standalone skills need none)
+
+### Windows
+
+```powershell
+irm https://raw.githubusercontent.com/ivan-cavero/agentkit/main/install.ps1 | iex
+```
+
+### Linux / macOS
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/ivan-cavero/agentkit/main/install.sh | bash
+```
+
+### From a local checkout
+
+```bash
+git clone https://github.com/ivan-cavero/agentkit.git
+cd agentkit
+node install-core.mjs
+# optional: npm install   # only if you prefer pre-installing TUI deps
+```
+
+### Override source repo (testing forks)
+
+```bash
+# PowerShell
+$env:AGENTKIT_REPO = "you/agentkit"; node install-core.mjs
+
+# bash
+AGENTKIT_REPO=you/agentkit node install-core.mjs
+```
 
 ---
 
-<a id="conceptos"></a>
-## 1. Conceptos: agent, skill, command
+## How to use after install
 
-### Agent
-Un **agente** es una "persona" de IA con un rol, una personalidad y permisos definidos, que vive dentro de tu coding agent (opencode, Claude Code…). Se define en un archivo Markdown con *frontmatter* (descripción, modo, permisos) y un prompt que le dice qué es y cómo comportarse.
+Restart your harness (OpenCode, Claude Code, Codex, …). Then:
 
-Dos tipos:
-- **Agente primario** (`mode: primary`) — el asistente principal con el que interactúas. Aparece como pestaña (tab) en opencode. Ej: `research`, `code`.
-- **Subagente** (`mode: subagent`) — un especialista que el agente principal invoca para tareas concretas con **contexto limpio** (no ve la conversación del padre). Aparece en `@` autocomplete. Ej: `gauntlet-critic`, `verifier`.
+| What | How |
+|------|-----|
+| **Agents** | Primary agents appear as tabs; subagents via `@` autocomplete |
+| **Commands** | Type `/gauntlet <your goal>` in any project |
+| **Skills** | Auto-loaded when the task matches (Agent Skills standard) |
 
-Instalar un agente = poner su `.md` en la carpeta de agentes de tu harness (`~/.config/opencode/agents/`, `~/.claude/agents/`, …).
+### Example: Gauntlet Loop
 
-### Skill
-Una **skill** es un paquete de instrucciones reutilizables (formato `SKILL.md` + `references/`) que el agente carga **bajo demanda** cuando la tarea lo requiere. Es como un "manual de procedimientos" que se activa automáticamente. Ej: la skill `gauntlet-loop` se carga cuando pides iterar contra un bar de calidad.
+```
+/gauntlet Implement the NBT reader for hyperion_protocol. Bar: round-trip with the
+current writer for all tag types, critic-defined tests (not builder-defined), fuzz
+target with no crashes, clippy -D warnings and clean fmt.
+```
+
+The lead agent splits the work, runs fresh `@gauntlet-builder` + `@gauntlet-critic` per piece, keeps a `workbench.md` progress log, and keeps going until the bar is beaten — or you stop it.
+
+### Long unattended runs (OpenCode)
+
+```bash
+opencode serve --port 4096
+opencode run --attach http://localhost:4096 --command gauntlet "your goal"
+```
+
+---
+
+## What gets installed
+
+### Skills (4)
+
+| Skill | What it does | Origin |
+|-------|--------------|--------|
+| **gauntlet-loop** | Shumer method: split → build → blind critic → repeat against a real bar. Domain guides: coding, writing, design, research, data-analysis, prompt-eval, detection. | Adapted from Matt Shumer |
+| **hallmark** | UI design skill that refuses AI-slop: themes, slop-test gates, verbs (`audit`, `redesign`, `study`, build). | [Nutlope/hallmark](https://github.com/Nutlope/hallmark), MIT |
+| **loop-engineering** | Token budget + kill-switch, durable `STATE.md`, maker/checker verifier, worktree isolation, human gates. | Inspired by [cobusgreyling/loop-engineering](https://github.com/cobusgreyling/loop-engineering), MIT |
+| **writing** | Anti-slop prose gate (EN + ES): kill filler, throat-clearers, fake emphasis, summary endings. | AgentKit |
+
+### Agents (8)
+
+**Core**
+
+| Agent | Mode | Role |
+|-------|------|------|
+| **research** | primary | Discovery: live web + arxiv, compares options, recommended solution with evidence |
+| **deep-research** | subagent | 5-loop exhaustive investigation with verifier challenges |
+| **verifier** | subagent | Devil’s advocate: hunts counter-evidence for a claim |
+| **code** | primary | General coding: read real code first, review, refactor, write |
+| **docs-writer** | primary | Docs with anti-slop gates (EN/ES) |
+
+**Gauntlet Loop**
+
+| Agent | Role |
+|-------|------|
+| **gauntlet-builder** | Builds/fixes **one** piece. Never self-grades. |
+| **gauntlet-critic** | Blind critic on the **real** artifact vs the bar. `edit: deny` |
+| **gauntlet-smoother** | Integrates parallel builds into one coherent whole |
 
 ### Command
-Un **command** (slash command) es un prompt empaquetado que ejecutas con `/nombre`. Recibe argumentos (`$ARGUMENTS`) y lanza una acción. Ej: `/gauntlet <objetivo>` arranca un Gauntlet Loop completo.
+
+| Command | Role |
+|---------|------|
+| `/gauntlet` | Driver for a full Gauntlet Loop from your objective |
 
 ---
 
-<a id="gauntlet"></a>
-## 2. El Gauntlet Loop
+## Where files go (paths)
 
-El **Gauntlet Loop** es un método de prompting para agentes, popularizado por **Matt Shumer** en 2026 con su proyecto viral *Claude of Duty* (un FPS estilo Call of Duty construido por un solo prompt, ~55.000 líneas de código, sin assets externos).
+**Agents and commands are always user-global** (per harness you selected). Only **skills** can be project-scoped.
 
-### La idea
+Skills follow the **Agent Skills open standard** so multiple harnesses can share them.
 
-Dale a un agente un objetivo ambicioso y un **bar real** que superar (tests, benchmarks, screenshots de un producto de referencia…). Deja que **divida** el trabajo en piezas pequeñas. Para cada pieza:
+| Piece | Global install | Project skills |
+|-------|----------------|----------------|
+| **Skills (OpenCode / OMO)** | `~/.agents/skills/` | `.agents/skills/` in current repo |
+| **Agents (OpenCode)** | `~/.config/opencode/agents/` | same (always global) |
+| **Commands (OpenCode)** | `~/.config/opencode/commands/` | same (always global) |
+| **Claude Code** | `~/.claude/{agents,skills,commands}/` | always global |
+| **Codex CLI** | `~/.codex/skills/` | always global |
+| **Oh My Pi** | `~/.omp/skills/` | always global |
+
+OpenCode loads skills from both `~/.agents/skills` and `.agents/skills`. MCP/provider config is written to the user OpenCode config (`~/.config/opencode/`), not into the project.
+
+---
+
+## Supported harnesses
+
+| Harness | Detection | Installs |
+|---------|-----------|----------|
+| **OpenCode** v1/v2 | `opencode` binary / Desktop | agents + skills + commands + MCPs + provider |
+| **OpenCode 2 (next)** | `opencode2` | same as OpenCode |
+| **oh-my-opencode (OMO)** | plugin / config | same paths as OpenCode |
+| **Oh My Pi (omp)** | `omp` / `~/.omp` | skills |
+| **Claude Code** | `claude` / `~/.claude` | agents + skills + commands |
+| **Codex CLI** | `codex` / `~/.codex` | skills |
+| **Standalone** | no harness | skills only → pick destination (default `~/.agents/skills`) |
+
+**OpenCode v1 vs v2:** v2 uses plural folders (`agents/`, `commands/`); v1 uses singular (`agent/`, `command/`). The installer detects layout and lets you choose v1 / v2 / both.
+
+---
+
+## Install modes
+
+| Mode | When | Result |
+|------|------|--------|
+| Full — OpenCode / OMO | harness detected | agents + skills + commands (+ optional MCP/provider) |
+| Full — Oh My Pi / Claude / Codex | harness detected | what that tool supports |
+| Full — global | default | agents/commands/skills into each selected harness’s user dirs |
+| Full — project skills | OpenCode/OMO | skills → `.agents/skills` in repo; agents/commands still user-global |
+| Standalone skills | no harness or skills-only | default `~/.agents/skills` (or project / custom) |
+
+**Multi-harness:** pick every tool you use in one run — each gets files in **its** global folders. **One step per category:** harnesses → layout → skills scope → Gauntlet pack → agents → skills → commands → MCPs/provider/plugins.
+
+---
+
+## Concepts
+
+### Agent
+
+An AI “persona” with role, personality, and permissions. Markdown + frontmatter inside your harness.
+
+- **Primary** (`mode: primary`) — main assistant (tabs in OpenCode). Ex: `research`, `code`.
+- **Subagent** (`mode: subagent`) — specialist with clean context, invoked via `@`. Ex: `gauntlet-critic`, `verifier`.
+
+### Skill
+
+On-demand procedure pack (`SKILL.md` + `references/`). Loaded when the task needs it. Portable across tools via `.agents/skills`.
+
+### Command
+
+Slash command (`/name`) with `$ARGUMENTS`. Ex: `/gauntlet <goal>`.
+
+---
+
+## The Gauntlet Loop
+
+A prompting method popularized by **Matt Shumer** (2026, *Claude of Duty*): ambitious goal + a **real bar** to beat. Split work into pieces; for each:
 
 ```
 split → build → BLIND CRITIC → repeat
 ```
 
-- **BUILDER** construye la pieza. *Nunca se autoevalúa* — un agente que construyó algo es un juez sesgado.
-- **CRITIC** (crítico ciego, con contexto fresco) inspecciona el **artefacto REAL** (compila, corre tests, mide, hace screenshot) contra el bar. No ve el razonamiento del builder.
-- Si pierde, identifica **el mayor gap** y lo devuelve a otra ronda. **Crítico nuevo en cada ronda** (reutilizar uno contamina el veredicto).
-- Se repite **sin límite arbitrario** hasta que el artefacto gane al bar — o tú lo pares.
+- **BUILDER** builds one piece and never self-grades.
+- **CRITIC** (fresh context) inspects the **real** artifact (tests, metrics, screenshots) against the bar.
+- On fail: return the biggest gap; **new critic every round**.
+- No arbitrary round cap — stop when the bar wins or you stop the loop.
 
-> El bar no necesita ser alcanzable. Call of Duty nunca perdió contra el juego de Shumer; solo dio dirección y evitó que parara en "bastante bueno para IA".
+**Loop engineering** is the larger discipline (budget, durable state, verifiers, human gates). The Gauntlet Loop is the quality pattern inside it. AgentKit ships both: `gauntlet-loop` (what is good) and `loop-engineering` (how to run safely).
 
-### Loop engineering = Gauntlet?
-
-No exactamente. **Loop engineering** es la disciplina completa (el contenedor): diseñar sistemas donde agentes trabajan en ciclos persistentes con presupuesto, estado durable, verificadores y gates humanos. El **Gauntlet Loop** es un patrón de calidad DENTRO de ella (builder + crítico ciego + bar). Por eso AgentKit incluye ambas: `gauntlet-loop` decide **qué es bueno**; `loop-engineering` decide **cómo correr el loop de forma segura y repetible**.
-
-### Qué instala el pack Gauntlet
-
-| Pieza | Rol |
-|-------|-----|
-| `/gauntlet` command | El driver: lanza el loop desde tu objetivo |
-| `gauntlet-builder` (subagente) | Construye/arregla una pieza concreta |
-| `gauntlet-critic` (subagente) | Crítico ciego: inspecciona el artefacto REAL, `edit: deny` |
-| `gauntlet-smoother` (subagente) | Integra las piezas tras cada ola (armoniza, no rediseña) |
-| `gauntlet-loop` skill | El método completo + guías por dominio (coding, writing, design…) |
+| Piece | Role |
+|-------|------|
+| `/gauntlet` | Loop driver |
+| `gauntlet-builder` | Builds one piece |
+| `gauntlet-critic` | Blind critic (`edit: deny`) |
+| `gauntlet-smoother` | Integrates after parallel waves |
+| `gauntlet-loop` skill | Full method + domain bar guides |
 
 ---
 
-<a id="skills"></a>
-## 3. Las 4 skills incluidas
-
-| Skill | Qué hace | Origen |
-|-------|----------|--------|
-| **gauntlet-loop** | Método completo de Shumer: split → build → blind critic → repeat contra un bar real. Guías por dominio: coding (test-as-bar), writing (blind A/B vs texto modelo), design, research, data-analysis, prompt-eval, detection. | Adaptación atribuida de Matt Shumer |
-| **hallmark** | Skill de diseño UI que **se niega a parecer generada por IA**: 20 temas, 57 slop-test gates, y 4 verbos (`audit`, `redesign`, `study`, build). | [Nutlope/hallmark](https://github.com/Nutlope/hallmark), MIT |
-| **loop-engineering** | El contenedor del Gauntlet: presupuesto de tokens con kill-switch, `STATE.md` como memoria durable, maker/checker verifier (REJECT hasta que la evidencia sea fuerte), worktree isolation, anti-gaming, human gates que superan al loop. | Inspirada en [cobusgreyling/loop-engineering](https://github.com/cobusgreyling/loop-engineering), MIT |
-| **writing** | Gate anti-slop para prosa y documentos (EN + ES): mata relleno, throat-clearers, énfasis falso, finales-resumen. Checklist de 12 puntos + lista de slop en español ("En este artículo exploraremos", "Cabe destacar"...). | AgentKit (de los gates de tu docs-writer + dominio writing de gauntlet-loop) |
-
----
-
-<a id="agentes"></a>
-## 4. Los 8 agentes incluidos
-
-### Núcleo (research)
-| Agente | Modo | Qué hace |
-|--------|------|----------|
-| **research** | primary | Agente de descubrimiento: investiga tu problema real con búsqueda web + arxiv en vivo, compara opciones y da una solución recomendada con evidencia. La primera conclusión es un borrador — intenta refutarse a sí mismo. |
-| **deep-research** | subagent | Investigación exhaustiva de 5 loops: genera hipótesis, busca en paralelo, reta al líder con un verifier, y solo termina con confianza alta. |
-| **verifier** | subagent | Abogado del diablo independiente: dado un claim, busca activamente contra-evidencia y devuelve un informe de reto estructurado. |
-| **code** | primary | Agente de código general: lee el código real primero, revisa patrones contra mejores prácticas actuales, refactoriza y escribe. |
-| **docs-writer** | primary | Documentación con gates anti-slop: lee código, verifica contra fuentes oficiales, escribe docs que suenan humanas (EN/ES). |
-
-### Gauntlet Loop (subagentes)
-| Agente | Qué hace |
-|--------|----------|
-| **gauntlet-builder** | BUILDER: construye o arregla UNA pieza específica. Nunca se autoevalúa — el crítico decide. |
-| **gauntlet-critic** | CRITIC: crítico ciego y despiadado. Inspecciona el artefacto REAL (corre tests, mide, screenshot) contra el bar, devuelve PASS/FAIL + el mayor gap. `edit: deny` — solo juzga. |
-| **gauntlet-smoother** | SMOOTHER: tras una ola de builds paralelos, integra las piezas, arregla inconsistencias y hace que el todo se sienta coherente. |
-
----
-
-<a id="harnesses"></a>
-## 5. Harnesses soportados
-
-| Harness | Detección | Qué instala | Dónde |
-|---------|-----------|-------------|-------|
-| **opencode** (v1/v2) | binario `opencode` / Desktop | agents + skills + commands + MCPs + provider | `~/.config/opencode/` (v2 plural) o `agent/` (v1 legacy) |
-| **opencode 2 (next)** | binario `opencode2` | igual que opencode | igual que opencode |
-| **oh-my-opencode (OMO)** | config `oh-my-openagent*` / plugin | igual que opencode | **mismas rutas** que opencode (las comparte) |
-| **Oh My Pi (omp)** | binario `omp` / `~/.omp` | skills | `~/.omp/skills/` (también hereda `.claude`/`.codex` skills) |
-| **Claude Code** | binario `claude` / `~/.claude` | agents + skills + commands | `~/.claude/` (formato Anthropic) |
-| **Codex CLI** | binario `codex` / `~/.codex` | skills | `~/.codex/skills/` |
-
-> **opencode v1 vs v2**: v2 (actual) usa carpetas plurales (`agents/`, `skills/`, `commands/`); v1 (legacy) usa singulares (`agent/`, `command/`). AgentKit detecta tu layout y te deja elegir v1 / v2 / **both**.
-
----
-
-<a id="modos"></a>
-## 6. Modos de instalación
-
-| Modo | Cuándo | Qué consigues |
-|------|--------|---------------|
-| **Full — opencode/OMO** | opencode detectado | agents + skills + commands + MCPs + provider, en `~/.config/opencode/` |
-| **Full — Oh My Pi (omp)** | `omp` detectado | skills en `~/.omp/skills/` |
-| **Full — Claude Code** | `claude` detectado | agents + skills + commands en `~/.claude/` |
-| **Full — Codex** | `codex` detectado | skills en `~/.codex/skills/` |
-| **Full — project** | dentro de un repo | archivos opencode/OMO en `.opencode/` del proyecto actual |
-| **Standalone skills** | sin harness, o solo quieres skills | skills en `~/.agents/skills`, `~/.claude/skills`, `~/.config/opencode/skills`, `.opencode/skills`, o ruta custom |
-
-**Multi-harness**: detecta todo lo que tienes y te pregunta para cuáles instalar — la misma selección puede ir a opencode, OMO, omp, Claude Code y Codex en un solo run.
-
-**Un paso por cosa**: cada categoría es una pregunta separada (harnesses → layout → scope → pack Gauntlet → agents → skills → commands → MCPs/provider/plugins). Cada lista muestra el catálogo COMPLETO y eliges con `space` (nada preseleccionado salvo los items del pack Gauntlet confirmado).
-
----
-
-<a id="instalacion"></a>
-## 7. Instalación
-
-### Linux / macOS
-```bash
-curl -fsSL https://raw.githubusercontent.com/ivan-cavero/agentkit/main/install.sh | bash
-```
-
-### Windows
-```powershell
-irm https://raw.githubusercontent.com/ivan-cavero/agentkit/main/install.ps1 | iex
-```
-
-### Directo (sin instalar nada a mano)
-El instalador **auto-instala sus dependencias** (`@clack/prompts`, `kleur`) la primera vez. Solo necesitas Node.js (v18+):
-
-```bash
-node install-core.mjs          # desde un checkout
-```
-
-### Requisitos
-- **Node.js** (v18+) — no hace falta `npm install` manual
-- **Docker/Podman** (solo si activas el MCP SearXNG)
-- **opencode / OMO / omp / Claude / Codex** (solo para modo full; standalone no necesita ninguno)
-
----
-
-<a id="uso"></a>
-## 8. Cómo se usa después
-
-Reinicia tu harness. Entonces:
-
-- **Agentes** aparecen como pestañas (primarios) o en `@` autocomplete (subagentes).
-- **Comandos**: escribe `/gauntlet <tu objetivo>` en cualquier proyecto.
-- **Skills**: se cargan automáticamente cuando la tarea es relevante.
-
-### Ejemplo de Gauntlet Loop
-
-```
-/gauntlet Implementa el NBT reader de hyperion_protocol. Bar: round-trip con el
-writer actual para todos los tag types, tests definidos por el crítico (no el
-builder), fuzz target sin crashes, clippy -D warnings y fmt limpios.
-```
-
-El agente lead divide el trabajo, lanza `@gauntlet-builder` + `@gauntlet-critic` frescos por pieza, mantiene un `workbench.md` de progreso, y no para hasta superar el bar — o hasta que tú lo pares.
-
-### Runs largos sin supervisión
-```bash
-opencode serve --port 4096
-opencode run --attach http://localhost:4096 --command gauntlet "tu objetivo"
-```
-
----
-
-<a id="estructura"></a>
-## 9. Estructura del repo
+## Repo layout
 
 ```
 agentkit/
-├── install-core.mjs        # instalador universal (Node, zero-config)
-├── install.sh / install.ps1# bootstraps (descarga + ejecuta)
-├── package.json            # deps del TUI (@clack/prompts, kleur)
-├── opencode.json           # fragmento MCP (se fusiona en tu config)
-├── agents/                 # 8 agentes (.md con frontmatter)
+├── install-core.mjs        # universal installer (Node)
+├── install.sh / install.ps1# one-liner bootstraps
+├── package.json            # TUI deps (@clack/prompts, kleur)
+├── opencode.json           # MCP fragment (merged into your config)
+├── agents/                 # 8 agents
 ├── commands/               # slash commands (gauntlet)
 ├── skills/                 # 4 skills + manifest.json
-│   ├── manifest.json       # catálogo data-driven que consume el instalador
-│   ├── gauntlet-loop/      # skill del método Shumer
-│   ├── hallmark/           # skill de diseño anti-slop (MIT, Nutlope)
-│   ├── loop-engineering/   # skill del contenedor (budget/state/verifier)
-│   └── writing/            # skill anti-slop de prosa EN+ES
 └── README.md
 ```
 
 ---
 
-<a id="troubleshooting"></a>
-## 10. Solución de problemas
+## Troubleshooting
 
-| Problema | Causa | Fix |
-|----------|-------|-----|
-| `ERR_MODULE_NOT_FOUND: @clack/prompts` | faltan deps | el instalador las auto-instala; si falló, `npm install` en la carpeta |
-| `MCP merge failed: Unexpected non-whitespace character after JSON` | `getText` recibía `404: Not Found` | arreglado: ahora 4xx/5xx devuelve `null`; además `readJSON` es JSONC-safe (BOM + comentarios) |
-| "Instala pero agents=0" | el repo remoto aún no tiene los archivos | renombra/push a `ivan-cavero/agentkit` y vuelve a ejecutar |
-| Quiero probar contra otro repo | — | `AGENTKIT_REPO=usuario/repo node install-core.mjs` |
-| Quiero saltar `npm pack` de MCPs | — | `AGENTKIT_SKIP_NPM=1 node install-core.mjs` |
+| Problem | Cause | Fix |
+|---------|--------|-----|
+| `ERR_MODULE_NOT_FOUND: kleur` or `@clack/prompts` | Temp one-liner install missing deps | Fixed in current installer (installs by package name into the script dir). Re-run the one-liner from `main`. Or: `node install-core.mjs` from a clone after `npm install`. |
+| `MCP merge failed: Unexpected non-whitespace…` | Bad remote fragment / comments | Installer uses JSONC-safe reads; ensure remote `opencode.json` is valid |
+| Install finishes but `agents=0` | Remote repo missing files | Confirm `ivan-cavero/agentkit` (or `AGENTKIT_REPO`) has `agents/` on `main` |
+| Test against a fork | — | `AGENTKIT_REPO=user/repo node install-core.mjs` |
+| Skip MCP `npm pack` | — | `AGENTKIT_SKIP_NPM=1 node install-core.mjs` |
 
 ---
 
-## Licencia
+## License
 
-MIT © Ivan Cavero. Proyecto independiente — las skills de terceros (hallmark, loop-engineering) conservan sus licencias (MIT) y su atribución.
+MIT © Ivan Cavero. Third-party skills (hallmark, loop-engineering) keep their MIT licenses and attribution.
 
-**Hecho con el método que instala: el Gauntlet Loop.**
+**Built with the method it installs: the Gauntlet Loop.**
